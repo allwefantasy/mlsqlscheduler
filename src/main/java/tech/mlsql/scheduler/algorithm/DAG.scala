@@ -1,9 +1,12 @@
 package tech.mlsql.scheduler.algorithm
 
+import tech.mlsql.scheduler.{JobNode, JobNodePointer}
+
 import scala.collection.mutable.ArrayBuffer
 
 /**
   * ref: https://www.cs.usfca.edu/~galles/visualization/TopoSortIndegree.html
+  * not thread safe
   */
 object DAG {
   def build[T <% Ordered[T]](items: Seq[(T, Option[T])]) = {
@@ -11,7 +14,7 @@ object DAG {
     val nodes = items.flatMap(item => Seq(item._1) ++ (item._2 match {
       case Some(value) => Seq(value)
       case None => Seq()
-    })).distinct.sorted.map(id => JobNodePointer(JobNode(id, 0), None))
+    })).distinct.sorted.map(id => JobNodePointer(JobNode(id, 0, 0, Seq(false), Seq(false), Seq(""), None, ""), None))
     val idToNode = nodes.map(f => (f.node.id, f)).toMap
 
     items.groupBy(f => f._1).map { idGroup =>
@@ -31,11 +34,14 @@ object DAG {
       }
       target
     }
-    new DAG[T](nodes)
+    val instance = new DAG[T](nodes)
+    instance.computeInDegree
+    instance
   }
 }
 
 case class DAG[T <% Ordered[T]](nodes: Seq[JobNodePointer[T]]) {
+
   private def computeInDegree = {
     nodes.foreach { item =>
       var current = item.next
@@ -46,21 +52,98 @@ case class DAG[T <% Ordered[T]](nodes: Seq[JobNodePointer[T]]) {
     }
   }
 
-  def dependencies[T](jobNodePointer: JobNodePointer[T]) = {
+  def outDegreeNodes[T](jobNodePointer: JobNodePointer[T]) = {
     var current = jobNodePointer
-    val box = ArrayBuffer[JobNode[T]]()
+    val box = ArrayBuffer[JobNodePointer[T]]()
     while (current.next.isDefined) {
       current = current.next.get
-      box += current.node
+      box += current
     }
     box
+  }
+
+  def findLeafNodeInTheSameTree(id: T) = {
+
+    val sameTreeGroup = getRootNodes.map { pointer =>
+      val inTheSameTree = scala.collection.mutable.HashSet[JobNode[T]]()
+      travel(pointer.node.id, p => {
+        if (p.next.isEmpty) {
+          inTheSameTree += p.node
+        }
+      })
+      inTheSameTree
+    }
+
+    val leafNodeInTheSameTree = sameTreeGroup.
+      filter(inTheSameTree => inTheSameTree.contains(getNodePointer(id).node)).
+      flatMap(f => f.toSeq).toSet
+
+    leafNodeInTheSameTree
+  }
+
+  def findNodeInTheSameTree(id: T) = {
+    val leafNodes = findLeafNodeInTheSameTree(id).map(f => f.id)
+    val stack = new scala.collection.mutable.Stack[JobNode[T]]()
+    getRootNodes.flatMap { pointer =>
+      val inTheSameTree = scala.collection.mutable.HashSet[JobNode[T]]()
+      travel(pointer.node.id, p => {
+        stack.push(p.node)
+        if (leafNodes.contains(p.node.id)) {
+          stack.foreach(f => inTheSameTree += f)
+          stack.clear()
+        }
+      })
+      inTheSameTree
+    }.toSet
+  }
+
+  def travel(id: T, visit: (JobNodePointer[T]) => Unit): Unit = {
+    val rootPointer = getNodePointer(id)
+    visit(rootPointer)
+    val outs = outDegreeNodes(rootPointer)
+    outs.foreach(f => travel(f.node.id, visit))
+  }
+
+  def getNodePointer(id: T) = {
+    nodes.filter(_.node.id == id).head
+  }
+
+  def isCircleDependency(id: T, dependedNodeId: T): Boolean = {
+    var exists = false
+    travel(dependedNodeId, (pointer) => {
+      if (pointer.node.id == id) {
+        exists = true
+      }
+    })
+    return exists
+
+  }
+
+  def isDependencyExists(id: T, dependedNodeId: T): Boolean = {
+    isCircleDependency(dependedNodeId, id)
+  }
+
+  /**
+    * get all nodes have no dependencies on them, so you can check
+    * whether they all have been configured time-scheduler
+    */
+  def getRootNodes = {
+    nodes.filter(f => f.node.inDegree == 0)
+  }
+
+  def getLeafNodes = {
+    nodes.filterNot(f => f.next.isDefined)
   }
 
   def topologicalSort() = {
     val executeSequence = ArrayBuffer[JobNode[T]]()
     val zeroInDegreeStack = scala.collection.mutable.Stack[JobNode[T]]()
-    computeInDegree
-    nodes.filter(f => f.node.inDegree == 0).foreach { item => zeroInDegreeStack.push(item.node) }
+
+    //    getLeafNodes.foreach(pointer => {
+    //      require(pointer.node.cron.isDefined, s"job ${pointer.node.id} should be configured time scheduler")
+    //    })
+
+    getRootNodes.foreach { item => zeroInDegreeStack.push(item.node) }
 
     while (!zeroInDegreeStack.isEmpty) {
       val item = zeroInDegreeStack.pop()
@@ -80,6 +163,4 @@ case class DAG[T <% Ordered[T]](nodes: Seq[JobNodePointer[T]]) {
 
 }
 
-case class JobNodePointer[T](node: JobNode[T], var next: Option[JobNodePointer[T]])
 
-case class JobNode[T](val id: T, var inDegree: Int)
