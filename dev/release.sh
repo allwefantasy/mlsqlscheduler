@@ -1,1 +1,1 @@
-mvn clean deploy -DskipTests -Pdisable-java8-doclint -Prelease-sign-artifacts
+mvn clean install -DskipTests -Pdisable-java8-doclint -Prelease-sign-artifacts
